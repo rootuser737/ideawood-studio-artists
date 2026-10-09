@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 - 2026-10-09
+- File size control: bitrate-capped profiles (Tiny / Small / Balanced / High), custom target size in MB, worst-case size
+  shown before rendering, grain/flicker/shake skipped in small files, "Shrink an existing video" tool. Fixes gigabyte outputs.
+- Verbose speech-model download: live MB, %, speed, time left, log, resume and cancel.
+- Custom AI visuals: AI art director + built-in generative backgrounds (aurora, stars, snow, embers, rain, bokeh, dust),
+  artist brief box, optional image-AI mode (OpenAI-compatible key); per-scene redo.
+- 78 bundled OFL fonts in 7 groups with a group filter; 23 presets; 10 text entrance animations; double outline, 3D shadow.
+- Effects: bloom, light leaks, chromatic split, flicker, shake, scanlines, letterbox, particle overlays, 8 grades, 28 transitions.
+
 ## 1.0.0 - 2026-10-08
 First release: lyric video maker split out of Ideawood Studio (voxcut).
 - Audio + pasted lyrics; Whisper auto-sync with fuzzy alignment, tap-to-sync, even spread, LRC import/export

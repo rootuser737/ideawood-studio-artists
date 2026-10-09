@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 
 from PySide6.QtCore import QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase, QIcon, QPixmap
@@ -17,11 +18,12 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QColo
                                QProgressBar, QPushButton, QScrollArea, QSlider, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget)
 
-from . import APP_NAME, __version__, asr, fonts, lyrics, render, scenes as scn, syncer, visuals
+from . import APP_NAME, __version__, asr, encoding, fonts, generative, imagegen, lyrics, render, scenes as scn, syncer, visuals
 from .cloud import CloudClient, CloudError
 from .paths import asset_path, bundled_fonts_dir, user_fonts_dir
+from .mediautil import media_info
 from .project import FORMATS, LOGO_POSITIONS, QUALITIES, Project
-from .styles import ANIMATIONS, GRADES, HIGHLIGHTS, PRESETS, TRANSITIONS, VIZ_MODES, LyricStyle
+from .styles import ANIMATIONS, GRADES, HIGHLIGHTS, OVERLAYS, PRESETS, TRANSITIONS, VIZ_MODES, LyricStyle
 from .theme import ACCENT_PRESETS, THEMES, apply_theme
 
 AUDIO_FILTER = "Songs (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.mp4 *.mov *.mkv);;All files (*)"
@@ -222,6 +224,93 @@ class TapSync(QDialog):
         return self.starts, self.last_end
 
 
+class ModelDownloadDialog(QDialog):
+    """Shows the speech-model download in detail: log, percent, MB, speed and time left. Resumable and cancellable."""
+    log_sig = Signal(str)
+    detail_sig = Signal(int, int, float, float)
+    prog_sig = Signal(float)
+    end_sig = Signal(str)
+
+    def __init__(self, parent, key: str):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QPlainTextEdit
+        self.key, self.ok_path, self.stop = key, "", False
+        self.setWindowTitle("Downloading the speech model")
+        self.resize(660, 460)
+        lay = QVBoxLayout(self)
+        self.head = QLabel(f"<b>{asr.MODELS[key][0]}</b>  ({asr.MODELS[key][2]} MB, downloaded once, works offline afterwards)")
+        self.head.setWordWrap(True)
+        lay.addWidget(self.head)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1000)
+        lay.addWidget(self.bar)
+        self.stats = QLabel("Starting...")
+        self.stats.setStyleSheet("font-size: 11pt;")
+        lay.addWidget(self.stats)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        lay.addWidget(self.log, 1)
+        self.cancel_b = btn("Cancel", self.cancel)
+        self.retry_b = btn("Retry / resume", self.start_download, True)
+        self.retry_b.setVisible(False)
+        self.close_b = btn("Close", self.accept)
+        self.close_b.setVisible(False)
+        lay.addWidget(hrow(self.cancel_b, self.retry_b, self.close_b))
+        self.log_sig.connect(lambda t: self.log.appendPlainText(time.strftime("%H:%M:%S  ") + t))
+        self.detail_sig.connect(self._detail)
+        self.prog_sig.connect(lambda v: self.bar.setValue(int(v * 10)))
+        self.end_sig.connect(self._end)
+        self.th = None
+        QTimer.singleShot(100, self.start_download)
+
+    def _detail(self, done, total, speed, eta):
+        def mm(x):
+            return f"{x / 1e6:.1f} MB"
+        eta_txt = "" if speed < 1 else "   -   about " + (f"{int(eta // 60)} min {int(eta % 60):02d} s" if eta >= 60 else f"{int(eta)} s") + " left"
+        self.stats.setText(f"{mm(done)} of {mm(total)}   -   {done * 100.0 / max(total, 1):.1f}%   -   "
+                           f"{speed / 1e6:.2f} MB/s{eta_txt}")
+
+    def start_download(self):
+        import threading
+        self.stop = False
+        self.retry_b.setVisible(False)
+        self.cancel_b.setVisible(True)
+        self.stats.setText("Connecting...")
+
+        def run():
+            try:
+                p = asr.download_model(self.key, self.prog_sig.emit, lambda: self.stop, self.log_sig.emit,
+                                       self.detail_sig.emit)
+                self.end_sig.emit("OK:" + p)
+            except asr.Cancelled:
+                self.end_sig.emit("CANCEL")
+            except Exception as e:  # noqa: BLE001
+                self.end_sig.emit("ERR:" + str(e))
+        self.th = threading.Thread(target=run, daemon=True)
+        self.th.start()
+
+    def cancel(self):
+        self.stop = True
+        self.stats.setText("Cancelling...")
+
+    def _end(self, msg):
+        self.cancel_b.setVisible(False)
+        if msg.startswith("OK:"):
+            self.ok_path = msg[3:]
+            self.stats.setText("Done - the speech model is ready.")
+            self.close_b.setVisible(True)
+            self.close_b.setText("Close")
+        else:
+            self.stats.setText("Cancelled. You can resume." if msg == "CANCEL" else msg[4:])
+            self.retry_b.setVisible(True)
+            self.close_b.setVisible(True)
+
+    def reject(self):
+        if self.th and self.th.is_alive():
+            self.stop = True
+        super().reject()
+
+
 class PickerDialog(QDialog):
     """Pick one of the search results for a scene (thumbnails)."""
 
@@ -346,6 +435,8 @@ class Studio(QMainWindow):
             self.fill_table()
         if i == 3:
             self.fill_scene_table()
+        if i == 4:
+            self._size_changed()
         self.schedule_preview()
 
     def _preview_panel(self):
@@ -405,7 +496,7 @@ class Studio(QMainWindow):
         self.refresh_models()
         l3.addWidget(hrow("Speech model", self.model, "Language", self.lang, stretch_first=False))
         l3.addWidget(self.model_note)
-        self.dl_btn = btn("Download model", self.download_model)
+        self.dl_btn = btn("Download / manage models...", self.download_model)
         l3.addWidget(hrow(btn("Auto-sync with AI", self.do_sync, True), btn("Tap to sync...", self.do_tap),
                           btn("Spread evenly (fix by hand)", self.do_spread), self.dl_btn))
         self.sync_msg = QLabel("")
@@ -424,8 +515,6 @@ class Studio(QMainWindow):
             self.model_note.setText("A speech model is ready. Music with loud instruments recognises best with Small.")
         else:
             self.model_note.setText("No speech model installed yet - download one (once) or use Tap to sync.")
-        if hasattr(self, "dl_btn"):
-            self.dl_btn.setVisible(not inst)
 
     def _meta_changed(self, *_):
         self.p.title, self.p.artist = self.title_edit.text(), self.artist_edit.text()
@@ -483,11 +572,11 @@ class Studio(QMainWindow):
 
     def download_model(self):
         key = self.model.currentData()
-
-        def fn(w):
-            return asr.download_model(key, w.progress.emit, lambda: w.stop)
-        self.run_worker(fn, f"Downloading the speech model ({asr.MODELS[key][2]} MB)...",
-                        lambda _r: (self.refresh_models(), self.say("Model ready.")))
+        dlg = ModelDownloadDialog(self, key)
+        dlg.exec()
+        self.refresh_models()
+        if dlg.ok_path:
+            self.say("Speech model ready.")
 
     def do_sync(self):
         if not self._need_ready(need_lyrics=False):
@@ -710,7 +799,10 @@ class Studio(QMainWindow):
         self.font_note = QLabel("")
         self.font_note.setObjectName("muted")
         self.font_box.currentTextChanged.connect(self._font_changed)
-        l1.addWidget(hrow("Font", self.font_box, btn("Add font file...", self.add_font), stretch_first=False))
+        self.font_group = combo(["All fonts"] + fonts.FONT_GROUPS)
+        self.font_group.currentTextChanged.connect(lambda _t: self.fill_fonts())
+        l1.addWidget(hrow("Group", self.font_group, "Font", self.font_box, btn("Add font file...", self.add_font),
+                          stretch_first=False))
         l1.addWidget(self.font_note)
         self.bold, self.italic, self.upper = QCheckBox("Bold"), QCheckBox("Italic"), QCheckBox("UPPERCASE")
         for c, a in ((self.bold, "bold"), (self.italic, "italic"), (self.upper, "uppercase")):
@@ -725,18 +817,23 @@ class Studio(QMainWindow):
         self.col_btns = {}
         row = []
         for label, attr in (("Unsung", "color_unsung"), ("Sung", "color_sung"), ("Outline", "outline_color"),
-                            ("Glow", "glow_color"), ("Box", "box_color"), ("Visualiser", "viz_color")):
+                            ("Glow", "glow_color"), ("Box", "box_color"), ("Outer ring", "outline2_color"),
+                            ("3D shadow", "shadow_color"), ("Visualiser", "viz_color"), ("Particles", "overlay_color")):
             b = QPushButton(label)
             b.clicked.connect(lambda _c=False, a=attr: self.pick_color(a))
             self.col_btns[attr] = b
             row.append(b)
-        l2.addWidget(hrow(*row))
+        l2.addWidget(hrow(*row[:5]))
+        l2.addWidget(hrow(*row[5:]))
         self._slider(l2, "Outline thickness", "outline", 0, 15, 100.0)
         self._slider(l2, "Shadow", "shadow", 0, 10, 100.0)
         self.glow, self.box = QCheckBox("Glow"), QCheckBox("Dark box behind text")
+        self.ring, self.extr = QCheckBox("Outer outline ring"), QCheckBox("3D offset shadow")
         self.glow.toggled.connect(lambda v: self._set("glow", v))
         self.box.toggled.connect(lambda v: self._set("box", v))
-        l2.addWidget(hrow(self.glow, self.box))
+        self.ring.toggled.connect(lambda v: self._set("outline2", v))
+        self.extr.toggled.connect(lambda v: self._set("extrude", v))
+        l2.addWidget(hrow(self.glow, self.box, self.ring, self.extr))
         self._slider(l2, "Box opacity", "box_alpha", 10, 100, 100.0)
 
         f3, l3 = card("Motion")
@@ -767,7 +864,21 @@ class Studio(QMainWindow):
         self.kb.toggled.connect(lambda v: self._set("ken_burns", v))
         self.vig.toggled.connect(lambda v: self._set("vignette", v))
         l4.addWidget(hrow(self.kb, self.vig))
-        return scroll(f0, f1, f2, f3, f4)
+        f5, l5 = card("Cinematic effects", "Mix as many as you like - each is optional and shows in the live preview.")
+        self._slider(l5, "Bloom (soft glow)", "bloom", 0, 100, 100.0)
+        self._slider(l5, "Light leaks", "light_leak", 0, 100, 100.0)
+        self._slider(l5, "Chromatic split", "chromatic", 0, 8, 1.0)
+        self._slider(l5, "Film flicker", "flicker", 0, 100, 100.0)
+        self._slider(l5, "Handheld shake", "shake", 0, 12, 1.0)
+        self.scan, self.lbox = QCheckBox("Scanlines (retro TV)"), QCheckBox("Cinema letterbox bars")
+        self.scan.toggled.connect(lambda v: self._set("scanlines", v))
+        self.lbox.toggled.connect(lambda v: self._set("letterbox", v))
+        l5.addWidget(hrow(self.scan, self.lbox))
+        self.overlay = combo(OVERLAYS)
+        self.overlay.currentTextChanged.connect(lambda v: self._set("overlay", v))
+        l5.addWidget(hrow("Floating particles", self.overlay, "(colour: Particles button above)"))
+        self._slider(l5, "Particle strength", "overlay_amount", 10, 100, 100.0)
+        return scroll(f0, f1, f2, f3, f4, f5)
 
     def _slider(self, lay, label, attr, lo, hi, scale):
         s = QSlider(Qt.Horizontal)
@@ -820,8 +931,10 @@ class Studio(QMainWindow):
     def fill_fonts(self, select=""):
         self._filling = True
         self.font_box.clear()
+        grp = self.font_group.currentText() if hasattr(self, "font_group") else "All fonts"
         for c in fonts.catalog():
-            self.font_box.addItem(c.label)
+            if grp == "All fonts" or c.mood.startswith(grp) or "(yours)" in c.label:
+                self.font_box.addItem(c.label)
         cur = select or next((c.label for c in fonts.catalog() if c.family == self.p.style.font), self.p.style.font)
         self.font_box.setCurrentText(cur)
         self._filling = False
@@ -856,10 +969,12 @@ class Studio(QMainWindow):
             val.setText(f"{getattr(st, attr):.2f}" if scale != 1.0 else str(int(getattr(st, attr))))
         for w, v in ((self.bold, st.bold), (self.italic, st.italic), (self.upper, st.uppercase), (self.glow, st.glow),
                      (self.box, st.box), (self.nextc, st.show_next), (self.dots, st.instrumental_dots),
-                     (self.titlec, st.title_card), (self.kb, st.ken_burns), (self.vig, st.vignette)):
+                     (self.titlec, st.title_card), (self.kb, st.ken_burns), (self.vig, st.vignette),
+                     (self.ring, st.outline2), (self.extr, st.extrude), (self.scan, st.scanlines),
+                     (self.lbox, st.letterbox)):
             w.setChecked(bool(v))
         for w, v in ((self.anim, st.anim_in), (self.hl, st.highlight), (self.grade, st.grade),
-                     (self.trans, st.transition), (self.viz, st.viz)):
+                     (self.trans, st.transition), (self.viz, st.viz), (self.overlay, st.overlay)):
             w.setCurrentText(v)
         self.preset.setCurrentText(st.name) if st.name in PRESETS else None
         self._paint_color_buttons()
@@ -867,7 +982,24 @@ class Studio(QMainWindow):
 
     # ---------------------------------------------------------------- page 4: visuals
     def page_visuals(self):
-        f1, l1 = card("AI visuals", "AI reads your lyrics, plans a search phrase for every part of the song and fetches background "
+        f0, l0 = card("Custom AI visuals - made for your song", "Describe the world of your video (or leave empty to let the lyrics decide). "
+                      "The AI art director reads every part of the lyrics and designs a different animated look per scene: aurora "
+                      "colour fields, stars, snow, embers, rain, bokeh, dust - tinted to the mood. Built-in mode needs no key and works "
+                      "offline. Image-AI mode paints real pictures with your own image key.")
+        self.brief = QTextEdit()
+        self.brief.setAcceptRichText(False)
+        self.brief.setFixedHeight(64)
+        self.brief.setPlaceholderText("e.g. neon rain over Kampala at night, warm street lights, gold dust, slow and dreamy")
+        l0.addWidget(self.brief)
+        self.gen_mode = combo(["Built-in generative art (offline)", "Image AI - real pictures (your key)"])
+        l0.addWidget(hrow("Mode", self.gen_mode))
+        self.ig_key, self.ig_model, self.ig_base = QLineEdit(self.qs.value("ig_key", "")), QLineEdit(self.qs.value("ig_model", imagegen.DEFAULT_MODEL)), QLineEdit(self.qs.value("ig_base", imagegen.DEFAULT_BASE))
+        self.ig_key.setEchoMode(QLineEdit.Password)
+        self.ig_key.setPlaceholderText("Image AI key (OpenAI-compatible)")
+        l0.addWidget(hrow(self.ig_key, self.ig_model, self.ig_base, stretch_first=True))
+        l0.addWidget(hrow(btn("Create custom visuals for all scenes", lambda: self.make_custom(False), True),
+                          btn("Redo selected scene only", lambda: self.make_custom(True))))
+        f1, l1 = card("Stock visuals (AI search)", "AI reads your lyrics, plans a search phrase for every part of the song and fetches background "
                       "pictures or video clips (needs your API key; rendering stays on this PC). Without a key you get designed "
                       "animated gradients, and you can always use your own pictures and clips.")
         self.key_edit = QLineEdit(self.cloud.api_key)
@@ -889,7 +1021,7 @@ class Studio(QMainWindow):
         self.sc_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.sc_table.setColumnWidth(0, 96)
         self.sc_table.setColumnWidth(1, 100)
-        self.sc_table.setColumnWidth(3, 90)
+        self.sc_table.setColumnWidth(3, 120)
         self.sc_table.verticalHeader().setVisible(False)
         self.sc_table.verticalHeader().setDefaultSectionSize(54)
         self.sc_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -908,14 +1040,47 @@ class Studio(QMainWindow):
         self.credit.toggled.connect(lambda v: setattr(self.p, "credit", v))
         l3.addWidget(hrow(self.logo_edit, btn("Browse...", self.browse_logo), self.logo_pos, stretch_first=True))
         l3.addWidget(self.credit)
+        self.sc_table.setMinimumHeight(260)
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(12)
+        v.addWidget(f0)
         v.addWidget(f1)
         v.addWidget(f2, 1)
         v.addWidget(f3)
-        return w
+        return scroll(f0, f1, f2, f3)
+
+    def make_custom(self, selected_only: bool):
+        if not self.p.lines:
+            QMessageBox.information(self, APP_NAME, "Time the lyrics first (steps 1-2).")
+            return
+        if not self.p.scenes:
+            self.p.scenes = scn.plan_scenes(self.p.lines, self.p.duration)
+        only = None
+        if selected_only:
+            r = self._srow()
+            if r < 0:
+                QMessageBox.information(self, APP_NAME, "Select a scene first.")
+                return
+            only = [r]
+        mode = "image_ai" if self.gen_mode.currentIndex() == 1 else "generative"
+        cfg = {"key": self.ig_key.text().strip(), "model": self.ig_model.text().strip(), "base": self.ig_base.text().strip()}
+        if self.remember.isChecked():
+            self.qs.setValue("ig_key", cfg["key"])
+        self.qs.setValue("ig_model", cfg["model"])
+        self.qs.setValue("ig_base", cfg["base"])
+        self._key_changed()
+        brief = self.brief.toPlainText().strip()
+
+        def fn(w):
+            return visuals.create_custom(self.p, brief, mode, self.cloud, cfg, only, w.status.emit, w.progress.emit, lambda: w.stop)
+
+        def ok(rep):
+            self.fill_scene_table()
+            self.schedule_preview()
+            self.say((f"Made {rep['made']} custom scene(s). " + " ".join(rep["notes"][:2])).strip())
+        self.run_worker(fn, "Designing custom visuals...", ok)
 
     def _key_changed(self):
         self.cloud.set_key(self.key_edit.text())
@@ -938,7 +1103,7 @@ class Studio(QMainWindow):
         for i, sc in enumerate(self.p.scenes):
             th = QTableWidgetItem("")
             th.setFlags(th.flags() & ~Qt.ItemIsEditable)
-            if sc.kind != "gradient":
+            if sc.kind not in ("gradient", "generated"):
                 tp = visuals.thumbnail(sc.path, sc.kind)
                 if tp:
                     th.setIcon(QIcon(QPixmap(tp).scaledToWidth(90)))
@@ -947,8 +1112,8 @@ class Studio(QMainWindow):
                 pm.fill(QColor(sc.colors[0]))
                 th.setIcon(QIcon(pm))
             self.sc_table.setItem(i, 0, th)
-            for c, v in ((1, f"{fmt_t(sc.start)}"), (2, sc.label), (3, {"ai": "AI", "mine": "Mine"}.get(sc.source, "Gradient"
-                                                                                                    if sc.kind == "gradient" else "—")),
+            for c, v in ((1, f"{fmt_t(sc.start)}"), (2, sc.label), (3, f"Made: {sc.recipe}" if sc.kind == "generated" else
+                          {"ai": "AI", "mine": "Mine"}.get(sc.source, "Gradient" if sc.kind == "gradient" else "—")),
                          (4, sc.query)):
                 it = QTableWidgetItem(v)
                 if c != 4:
@@ -1058,10 +1223,24 @@ class Studio(QMainWindow):
         self.fmt = combo(list(FORMATS), self.p.fmt)
         self.qual = combo(list(QUALITIES), self.p.quality)
         self.fmt.currentTextChanged.connect(lambda v: (setattr(self.p, "fmt", v), self.schedule_preview()))
-        self.qual.currentTextChanged.connect(lambda v: setattr(self.p, "quality", v))
+        self.qual.currentTextChanged.connect(lambda v: (setattr(self.p, "quality", v), self._size_changed()))
         self.norm = QCheckBox("Normalise loudness for YouTube / Spotify (-14 LUFS). Leave off for already-mastered songs.")
         self.norm.toggled.connect(lambda v: setattr(self.p, "normalize_audio", v))
-        l1.addWidget(hrow("Shape", self.fmt, "Quality", self.qual))
+        l1.addWidget(hrow("Shape", self.fmt, "Largest size", self.qual))
+        self.size_prof = combo(list(encoding.PROFILES), self.p.size_profile)
+        self.target = QDoubleSpinBox()
+        self.target.setRange(1.0, 4000.0)
+        self.target.setDecimals(1)
+        self.target.setSingleStep(1.0)
+        self.target.setValue(self.p.target_mb)
+        self.target.setSuffix(" MB")
+        self.size_prof.currentTextChanged.connect(lambda _t: self._size_changed())
+        self.target.valueChanged.connect(lambda _v: self._size_changed())
+        l1.addWidget(hrow("File size", self.size_prof, "Target", self.target))
+        self.size_note = QLabel("")
+        self.size_note.setObjectName("muted")
+        self.size_note.setWordWrap(True)
+        l1.addWidget(self.size_note)
         l1.addWidget(self.norm)
         self.out_edit = QLineEdit()
         self.out_edit.setPlaceholderText("Where to save the MP4")
@@ -1070,11 +1249,52 @@ class Studio(QMainWindow):
                       "on a normal laptop.")
         self.render_btn = btn("Render lyric video", lambda: self.start_render(False), True)
         l2.addWidget(hrow(self.render_btn, btn("Open output folder", self.open_folder), btn("Save project...", self.save_project)))
+        l2.addWidget(hrow(btn("Shrink an existing video...", self.shrink_video),
+                          "Re-compress any big video file (e.g. 1 GB -> a few MB) using the file size chosen above."))
         self.result = QLabel("")
         self.result.setObjectName("muted")
         self.result.setWordWrap(True)
         l2.addWidget(self.result)
         return scroll(f1, f2)
+
+    def _size_changed(self):
+        self.p.size_profile = self.size_prof.currentText()
+        self.p.target_mb = self.target.value()
+        custom = encoding.PROFILES.get(self.p.size_profile) == "custom"
+        self.target.setVisible(custom)
+        dur = self.p.duration or 180.0
+        pl = render.encode_plan(self.p)
+        st = self.p.style
+        txt = (f"Worst case about {pl.est_max_mb:.0f} MB for this song ({fmt_t(dur)}) - usually much smaller. "
+               f"Video {pl.short}p at up to {pl.maxrate_k} kbps, audio {pl.audio_k} kbps.")
+        if pl.strip_noise and (st.grain > 0 or st.flicker > 0 or st.shake > 0):
+            txt += " Film grain, flicker and shake are skipped at this size - they make files huge."
+        if pl.note:
+            txt += " " + pl.note
+        self.size_note.setText(txt)
+
+    def shrink_video(self):
+        src, _ = QFileDialog.getOpenFileName(self, "Choose a video to shrink", "", "Videos (*.mp4 *.mov *.mkv *.webm *.avi *.m4v)")
+        if not src:
+            return
+        base = os.path.splitext(src)[0] + "_small.mp4"
+        out, _ = QFileDialog.getSaveFileName(self, "Save the smaller video as", base, "MP4 video (*.mp4)")
+        if not out:
+            return
+        prof, tmb, q = self.size_prof.currentText(), self.target.value(), QUALITIES.get(self.qual.currentText(), 1080)
+
+        def fn(w):
+            from .mediautil import Job
+            from .paths import find_tool
+            info = media_info(src)
+            cmd, pl = encoding.shrink_command(find_tool("ffmpeg"), src, out, prof, q, info["duration"], tmb)
+            Job(cmd, info["duration"]).run(w.progress.emit)
+            return os.path.getsize(src) / 1048576, os.path.getsize(out) / 1048576
+
+        def ok(r):
+            self.result.setText(f"Shrunk {r[0]:.1f} MB  ->  {r[1]:.1f} MB   ({out})")
+            self.say("Done - smaller video saved.")
+        self.run_worker(fn, "Shrinking the video...", ok)
 
     def browse_out(self):
         base = (self.p.title or "lyric_video").replace(" ", "_") + ".mp4"
@@ -1116,7 +1336,8 @@ class Studio(QMainWindow):
                 if credits:
                     with open(os.path.splitext(out)[0] + ".credits.txt", "w", encoding="utf-8") as f:
                         f.write(credits)
-                self.result.setText(f"Saved: {out}" + ("  (media credits saved next to it)" if credits else ""))
+                mb = os.path.getsize(out) / 1048576
+                self.result.setText(f"Saved: {out}  -  {mb:.1f} MB" + ("  (media credits saved next to it)" if credits else ""))
                 self.say("Your lyric video is ready.")
                 QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(os.path.abspath(out))))
         self.run_worker(fn, "Rendering...", ok)
@@ -1152,6 +1373,8 @@ class Studio(QMainWindow):
         self.lyr_edit.setPlainText(self.p.lyrics_text)
         self.fmt.setCurrentText(self.p.fmt)
         self.qual.setCurrentText(self.p.quality)
+        self.size_prof.setCurrentText(self.p.size_profile)
+        self.target.setValue(self.p.target_mb)
         self.logo_edit.setText(self.p.logo)
         self.sync_look_widgets()
         self.fill_table()

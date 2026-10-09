@@ -12,10 +12,12 @@ from typing import Callable, List, Optional, Tuple
 
 from .ass_lyrics import build_ass
 from .fonts import prepare_fontsdir
+from . import encoding
 from .mediautil import Job
 from .paths import find_tool
-from .project import CRF, QUALITIES, Project, Scene, frame_size
-from .styles import GRADES, LyricStyle
+from .project import QUALITIES, Project, Scene, frame_size
+from . import generative
+from .styles import GRADES, MIX_TRANSITIONS, LyricStyle
 
 FPS = 30
 KB_SCALE = 1.5          # Ken Burns works on an image this much larger than the frame (keeps motion smooth)
@@ -23,6 +25,13 @@ KB_SCALE = 1.5          # Ken Burns works on an image this much larger than the 
 
 class Cancelled(Exception):
     pass
+
+
+def encode_plan(p: Project, preview: bool = False) -> encoding.EncodePlan:
+    """The size/quality plan for this project (the preview clip is always a small fast draft)."""
+    if preview:
+        return encoding.EncodePlan(480, 30, 27, 1500, 128, "ultrafast", True, False, 0.0)
+    return encoding.plan(p.size_profile, QUALITIES.get(p.quality, 1080), p.duration, p.target_mb)
 
 
 def _even(x: float) -> int:
@@ -36,6 +45,8 @@ def _hex(c: str) -> str:
 def _segment(idx: int, i: int, sc: Scene, L: float, w: int, h: int, st: LyricStyle, seed: int = 0):
     """-> (ffmpeg input args, filter text producing [s<i>] from input number ``idx``)."""
     end = f"setsar=1,format=yuv420p,fps={FPS},settb=1/{FPS},setpts=PTS-STARTPTS[s{i}]"
+    if sc.kind == "generated":
+        return ([], generative.scene_graph(sc.recipe or "aurora", sc.colors, w, h, L, i, seed, end, FPS))
     usable = sc.kind in ("image", "video") and sc.path and os.path.isfile(sc.path)
     if usable and sc.kind == "video":
         return (["-stream_loop", "-1", "-t", f"{L:.3f}", "-i", sc.path],
@@ -59,20 +70,72 @@ def _segment(idx: int, i: int, sc: Scene, L: float, w: int, h: int, st: LyricSty
             f"[{idx}:v]{end}")
 
 
-def _post_chain(st: LyricStyle, w: int, h: int) -> str:
-    parts: List[str] = []
+def post_graph(st: LyricStyle, w: int, h: int, dur: float, src: str, dst: str, tag: str = "") -> List[str]:
+    """Background treatment as filter-graph chunks from ``src`` to ``dst``: shake, blur, grade, dim, light leaks,
+    particles, bloom, chromatic split, flicker, scanlines, letterbox, vignette, grain."""
+    chunks: List[str] = []
+    cur, n = src, [0]
+    k = h / 1080.0
+
+    def nxt() -> str:
+        n[0] += 1
+        return f"[{tag}x{n[0]}]"
+
+    def lin(f: str):
+        nonlocal cur
+        out = nxt()
+        chunks.append(f"{cur}{f}{out}")
+        cur = out
+
+    if st.shake > 0:
+        m = max(2, int(st.shake * k * 2))
+        lin(f"crop=iw-{m * 2}:ih-{m * 2}:x='{m}+{m * 0.9:.1f}*sin(t*2.7)':y='{m}+{m * 0.8:.1f}*cos(t*2.1)',scale={w}:{h}")
     if st.bg_blur > 0:
-        parts.append(f"gblur=sigma={st.bg_blur * h / 1080:.1f}")
+        lin(f"gblur=sigma={st.bg_blur * k:.1f}")
     g = GRADES.get(st.grade, "")
     if g:
-        parts.append(g)
+        lin(g)
     if st.bg_dim > 0:
-        parts.append(f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{min(st.bg_dim, 0.9):.2f}:t=fill")
+        lin(f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{min(st.bg_dim, 0.9):.2f}:t=fill")
+    if st.light_leak > 0:
+        chunks.append(f"gradients=s={w}x{h}:r={FPS}:d={dur + 2:.2f}:c0=0xFF7A18:c1=0xAF002D:c2=0x319197:c3=0xFFC857:"
+                      f"nb_colors=4:speed=0.05:seed=7,format=yuv420p[{tag}leak]")
+        out = nxt()
+        chunks.append(f"{cur}[{tag}leak]blend=all_mode=screen:all_opacity={min(st.light_leak, 1) * 0.6:.2f}:shortest=1{out}")
+        cur = out
+    if st.overlay != "none":
+        chunks.append(generative_overlay(st, w, h, dur, f"{tag}pl"))
+        out = nxt()
+        chunks.append(f"{cur}[{tag}pl]blend=all_mode=screen:shortest=1{out}")
+        cur = out
+    if st.bloom > 0:
+        a, b = f"[{tag}ba]", f"[{tag}bb]"
+        chunks.append(f"{cur}split{a}{b}")
+        chunks.append(f"{b}gblur=sigma={max(6, 14 * k):.1f},eq=brightness=0.04:contrast=1.3[{tag}bc]")
+        out = nxt()
+        chunks.append(f"{a}[{tag}bc]blend=all_mode=screen:all_opacity={min(st.bloom, 1):.2f}{out}")
+        cur = out
+    if st.chromatic > 0:
+        px = max(1, int(round(st.chromatic * k)))
+        lin(f"rgbashift=rh=-{px}:bh={px}")
+    if st.flicker > 0:
+        lin(f"eq=brightness='{0.05 * st.flicker:.3f}*sin(t*37)*sin(t*11.3)':eval=frame")
+    if st.scanlines:
+        lin(f"drawgrid=y=0:h={max(3, int(4 * k))}:t=1:c=black@0.22")
+    if st.letterbox:
+        lin(f"drawbox=x=0:y=0:w=iw:h=ih*0.11:color=black:t=fill,drawbox=x=0:y=ih*0.89:w=iw:h=ih*0.11:color=black:t=fill")
     if st.vignette:
-        parts.append("vignette=angle=PI/5")
+        lin("vignette=angle=PI/5")
     if st.grain > 0:
-        parts.append(f"noise=alls={int(st.grain * 150)}:allf=t")
-    return ",".join(parts) or "null"
+        lin(f"noise=alls={int(st.grain * 150)}:allf=t")
+    if not chunks:
+        return [f"{src}null{dst}"]
+    chunks[-1] = chunks[-1][: chunks[-1].rindex("[")] + dst
+    return chunks
+
+
+def generative_overlay(st: LyricStyle, w: int, h: int, dur: float, label: str) -> str:
+    return generative.particle_chain(st.overlay, w, h, dur, st.overlay_color, st.overlay_amount, label, FPS)
 
 
 def _logo_pos(name: str) -> str:
@@ -89,9 +152,10 @@ def effective_transition(st: LyricStyle, scenes: List[Scene]) -> float:
 
 def build_command(p: Project, out_path: str, work: str, ff: str, *, preview: bool = False,
                   t0: float = 0.0, span: Optional[float] = None) -> Tuple[list, float]:
-    short = 480 if preview else QUALITIES.get(p.quality, 1080)
+    pl = encode_plan(p, preview)
+    short = pl.short
     w, h = frame_size(p.fmt, short)
-    st = p.style
+    st = encoding.apply_to_style(p.style, pl)
     scenes = [s for s in p.scenes if s.duration > 0.05] or [Scene(0, p.duration)]
     scenes[0].start = 0.0
     scenes[-1].end = max(scenes[-1].end, p.duration)
@@ -114,9 +178,10 @@ def build_command(p: Project, out_path: str, work: str, ff: str, *, preview: boo
         for k in range(1, n):
             off += scenes[k - 1].duration
             out = "[vj]" if k == n - 1 else f"[x{k}]"
-            filt.append(f"{cur}[s{k}]xfade=transition={st.transition}:duration={T:.3f}:offset={off:.3f}{out}")
+            tr = MIX_TRANSITIONS[(k - 1) % len(MIX_TRANSITIONS)] if st.transition == "mix" else st.transition
+            filt.append(f"{cur}[s{k}]xfade=transition={tr}:duration={T:.3f}:offset={off:.3f}{out}")
             cur = out
-    filt.append(f"[vj]{_post_chain(st, w, h)}[vp]")
+    filt += post_graph(st, w, h, p.duration, "[vj]", "[vp]")
     cur = "[vp]"
 
     a_idx = inputs.count("-i")                                  # audio is the next input number
@@ -156,16 +221,16 @@ def build_command(p: Project, out_path: str, work: str, ff: str, *, preview: boo
            "-map", "[v]", "-map", "[a]"]
     if preview:
         cmd += ["-ss", f"{t0:.2f}"]
-    cmd += ["-t", f"{out_dur:.2f}", "-r", str(FPS), "-c:v", "libx264", "-preset", "ultrafast" if preview else "medium",
-            "-crf", str(27 if preview else CRF.get(short, 20)), "-pix_fmt", "yuv420p", "-profile:v", "high",
-            "-c:a", "aac", "-b:a", "256k", "-ar", "48000", "-movflags", "+faststart", os.path.abspath(out_path)]
+    cmd += ["-t", f"{out_dur:.2f}", *encoding.x264_args(pl), *encoding.audio_args(pl), "-movflags", "+faststart",
+            os.path.abspath(out_path)]
     return cmd, out_dur
 
 
 def write_ass(p: Project, work: str, preview: bool = False) -> Tuple[str, int, int]:
-    w, h = frame_size(p.fmt, 480 if preview else QUALITIES.get(p.quality, 1080))
+    w, h = frame_size(p.fmt, encode_plan(p, preview).short)
     credit = "Lyric video made with Ideawood Studio for Artists" if p.credit else ""
-    text = build_ass(p.lines, p.style, w, h, p.duration, p.title, p.artist, credit)
+    text = build_ass(p.lines, encoding.apply_to_style(p.style, encode_plan(p, preview)), w, h, p.duration, p.title,
+                     p.artist, credit)
     with open(os.path.join(work, "lyrics.ass"), "w", encoding="utf-8") as f:
         f.write(text)
     prepare_fontsdir(work)
@@ -225,12 +290,12 @@ def preview_frame(p: Project, t: float, out_png: str, short: int = 540) -> str:
         prepare_fontsdir(work)
         sc = next((s for s in p.scenes if s.start <= t < s.end), p.scenes[0] if p.scenes else Scene(0, max(p.duration, 1)))
         idx = p.scenes.index(sc) if sc in p.scenes else 0
-        sc1 = Scene(0, 2.0, sc.kind, sc.path, colors=sc.colors)
+        sc1 = Scene(0, 2.0, sc.kind, sc.path, colors=sc.colors, recipe=sc.recipe)
         st = p.style.copy()
         st.ken_burns = False
         args, f = _segment(0, idx, sc1, 2.0, w, h, st, seed=int(p.duration) + 1)
-        fc = (f"{f};[s{idx}]{_post_chain(st, w, h)},setpts=PTS+{t:.3f}/TB,"
-              f"ass=filename=lyrics.ass:fontsdir=fonts,format=rgb24[v]")
+        post = ";".join(post_graph(st, w, h, 3.0, f"[s{idx}]", "[vp]", "f"))
+        fc = (f"{f};{post};[vp]setpts=PTS+{t:.3f}/TB,ass=filename=lyrics.ass:fontsdir=fonts,format=rgb24[v]")
         cmd = [ff, "-y", "-nostdin", "-v", "error", *args, "-filter_complex", fc, "-map", "[v]", "-frames:v", "1",
                os.path.abspath(out_png)]
         r = subprocess.run(cmd, cwd=work, capture_output=True, text=True, errors="replace",

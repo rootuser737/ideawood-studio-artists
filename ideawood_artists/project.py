@@ -36,13 +36,14 @@ def frame_size(fmt: str, short_side: int) -> tuple:
 class Scene:
     start: float
     end: float
-    kind: str = "gradient"          # "image" | "video" | "gradient"
+    kind: str = "gradient"          # "image" | "video" | "gradient" | "generated"
     path: str = ""
     query: str = ""                 # search phrase used for AI visuals
     source: str = "auto"            # "auto" | "ai" | "mine"
     credit: str = ""
     key: str = ""                   # identical stanzas (the chorus) share a key and therefore a background
     colors: List[str] = field(default_factory=lambda: ["#141E30", "#243B55"])
+    recipe: str = ""                # generated scenes: aurora / stars / snow / embers / rain / bokeh / dust ...
     label: str = ""                 # first words of the lyrics in this scene (for the table)
 
     @property
@@ -69,6 +70,8 @@ class Project:
     logo_size: float = 0.12
     credit: bool = False
     normalize_audio: bool = False
+    size_profile: str = "Balanced - YouTube & Instagram (3 min: up to ~80 MB, 1080p)"
+    target_mb: float = 10.0
     language: str = "auto"
 
     def to_dict(self) -> dict:

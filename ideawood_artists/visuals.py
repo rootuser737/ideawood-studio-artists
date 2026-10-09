@@ -20,6 +20,7 @@ from typing import Callable, Dict, List, Optional
 from .cloud import CloudClient, CloudError
 from .lyrics import LyricLine
 from .project import Project, Scene
+from . import generative, imagegen
 from .scenes import share_by_key
 
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -288,3 +289,61 @@ def thumbnail(path: str, kind: str, out_png: Optional[str] = None, width: int = 
            "-vf", f"scale={width}:-2", out_png]
     r = subprocess.run(cmd, capture_output=True, creationflags=no_window_flags())
     return out_png if r.returncode == 0 and os.path.exists(out_png) else None
+
+
+# --------------------------------------------------------------------------- custom (made, not searched) visuals
+def create_custom(p: Project, brief: str = "", mode: str = "generative", cloud: Optional[CloudClient] = None,
+                  imagegen_cfg: Optional[dict] = None, only: Optional[List[int]] = None,
+                  on_status: Callable[[str], None] = lambda s: None, on_progress: Callable[[float], None] = lambda v: None,
+                  should_cancel: Callable[[], bool] = lambda: False, workdir: Optional[str] = None) -> dict:
+    """Make custom backgrounds from the lyrics + the artist's brief.
+
+    mode "generative": built-in animated art (aurora / stars / snow / embers / rain / bokeh / dust), offline.
+    mode "image_ai":   one AI picture per distinct stanza through the configured image endpoint; any failure falls
+                       back to generative art for that scene so the video never has a hole.
+    The AI search phrases (when the cloud key is set) steer the art direction in both modes.
+    """
+    notes: List[str] = []
+    scenes = p.scenes
+    idxs = [i for i in (only if only is not None else range(len(scenes))) if scenes[i].source != "mine"]
+    if not idxs:
+        return {"made": 0, "notes": ["Nothing to make (all scenes use your own files)."]}
+    phrases = plan_queries(cloud, p, [scenes[i] for i in idxs], on_status) if cloud is not None and cloud.signed_in \
+        else [""] * len(idxs)
+    made, by_key = 0, {}
+    wd = workdir or media_dir()
+    cfg = imagegen_cfg or {}
+    for n, (i, ph) in enumerate(zip(idxs, phrases)):
+        if should_cancel():
+            break
+        on_progress(100.0 * n / len(idxs))
+        sc = scenes[i]
+        text = scene_text(p, sc)
+        hint = ph if (cloud is not None and cloud.signed_in) else ""
+        recipe, colors = generative.look_for(text, hint, brief, p.genre + " " + p.mood, i)
+        sc.query = (hint or brief or recipe)[:80]
+        if mode == "image_ai":
+            twin = by_key.get(sc.key)
+            if twin:
+                sc.kind, sc.path, sc.source, sc.credit = "image", twin, "ai", ""
+                made += 1
+                continue
+            on_status(f"Creating AI picture {n + 1}/{len(idxs)}...")
+            theme = hint or " ".join(keywords(text, 5)) or recipe
+            try:
+                size = imagegen.size_for(p.orientation, cfg.get("model") or imagegen.DEFAULT_MODEL)
+                path = imagegen.generate_image(imagegen.build_prompt(brief, theme, p.mood, p.genre),
+                                               os.path.join(wd, f"gen_{abs(hash((sc.key, brief))) % 10**8}"),
+                                               cfg.get("key", ""), cfg.get("base") or imagegen.DEFAULT_BASE,
+                                               cfg.get("model") or imagegen.DEFAULT_MODEL, size)
+                sc.kind, sc.path, sc.source, sc.credit = "image", path, "ai", ""
+                by_key[sc.key] = path
+                made += 1
+                continue
+            except imagegen.ImageGenError as e:
+                notes.append(f"Scene {i + 1}: {e} - used generative art instead.")
+        on_status(f"Designing visuals {n + 1}/{len(idxs)}: {recipe}")
+        sc.kind, sc.recipe, sc.colors, sc.source, sc.path, sc.credit = "generated", recipe, colors, "ai", "", ""
+        made += 1
+    on_progress(100.0)
+    return {"made": made, "notes": notes}

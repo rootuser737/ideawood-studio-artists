@@ -28,11 +28,15 @@ HOLD = 0.45            # and lingers this long after its last word (when there i
 
 
 # average glyph width as a fraction of the font size (used only to decide where lines wrap)
-FONT_WIDTH = {"Anton": 0.44, "Bebas Neue": 0.40, "Staatliches": 0.44, "Great Vibes": 0.36, "Lobster": 0.50,
+FONT_WIDTH = {"Fjalla One": 0.46, "Squada One": 0.46, "Russo One": 0.58, "Black Ops One": 0.64, "Bangers": 0.50,
+              "Passion One": 0.54, "Press Start 2P": 0.95, "Bungee Inline": 0.70, "Bungee Shade": 0.70,
+              "Audiowide": 0.66, "Faster One": 0.72, "Michroma": 0.74, "Rubik Mono One": 0.82, "Fugaz One": 0.56,
+              "Sacramento": 0.34, "Allura": 0.36, "Alex Brush": 0.36, "Parisienne": 0.40, "Mouse Memoirs": 0.44,
+              "Londrina Solid": 0.50, "Chango": 0.70, "Modak": 0.70, "Bowlby One": 0.66, "Sigmar One": 0.64,"Anton": 0.44, "Bebas Neue": 0.40, "Staatliches": 0.44, "Great Vibes": 0.36, "Lobster": 0.50,
               "Pacifico": 0.56, "Monoton": 0.72, "Bungee": 0.68, "Archivo Black": 0.62, "Alfa Slab One": 0.66,
               "Righteous": 0.56, "Poppins": 0.58, "Poppins ExtraBold": 0.60, "Abril Fatface": 0.52,
               "DM Serif Display": 0.50}
-CAPS_FONTS = {"Anton", "Bebas Neue", "Staatliches", "Bungee", "Monoton"}
+CAPS_FONTS = {"Fjalla One", "Squada One", "Black Ops One", "Bangers", "Press Start 2P", "Anton", "Bebas Neue", "Staatliches", "Bungee", "Monoton"}
 
 
 def font_px(w: int, h: int, size: float) -> int:
@@ -110,18 +114,32 @@ def _prepare(line: LyricLine, st: LyricStyle, g: _Geom):
     return toks, set(wrap_balanced(toks, g.max_chars)), times
 
 
-def _anim_tags(st: LyricStyle, x: int, y: float, fs: int, fade_out_ms: int) -> str:
+def _anim_tags(st: LyricStyle, x: int, y: float, fs: int, fade_out_ms: int, w: int = 0, h: int = 0) -> str:
     ms = max(0, int(st.anim_ms))
     base = f"\\an8\\pos({x},{y:.0f})"
-    if st.anim_in == "none":
+    kind = st.anim_in
+    if kind == "none":
         return base
     fad = f"\\fad({ms},{fade_out_ms})"
-    if st.anim_in == "pop":
+    t1, t2 = int(ms * 0.6), ms
+    if kind == "pop":
         return base + fad + f"\\fscx82\\fscy82\\t(0,{ms},\\fscx100\\fscy100)"
-    if st.anim_in == "slide":
+    if kind == "bounce":
+        return (base + fad + f"\\fscx55\\fscy55\\t(0,{t1},\\fscx114\\fscy114)\\t({t1},{t2},\\fscx100\\fscy100)")
+    if kind == "zoom_out":
+        return base + fad + f"\\fscx135\\fscy135\\t(0,{ms},\\fscx100\\fscy100)"
+    if kind == "slide":
         return f"\\an8\\move({x},{y + fs * 0.55:.0f},{x},{y:.0f},0,{ms})" + fad
-    if st.anim_in == "blur":
+    if kind == "drop":
+        return f"\\an8\\move({x},{y - fs * 1.1:.0f},{x},{y:.0f},0,{ms})" + fad
+    if kind == "blur":
         return base + fad + f"\\blur14\\t(0,{ms},\\blur0)"
+    if kind == "wipe":                                        # reveal left -> right
+        return base + f"\\fad(0,{fade_out_ms})\\clip(0,0,0,{h})\\t(0,{ms},\\clip(0,0,{w},{h}))"
+    if kind == "spread":                                      # letters glide together
+        return base + fad + f"\\fsp{fs * 0.45:.1f}\\t(0,{ms},\\fsp{st.spacing * (h / 1080.0 if h else 1):.1f})"
+    if kind == "flip":                                        # 3D flip in
+        return base + fad + f"\\frx80\\t(0,{ms},\\frx0)"
     return base + fad
 
 
@@ -156,7 +174,7 @@ def _style_row(name: str, st: LyricStyle, fs: int, g: _Geom, *, unsung: str, sun
     ml = int(g.w * 0.07)
     # ASS: PrimaryColour = already sung, SecondaryColour = not yet sung
     return (f"Style: {name},{font or st.font},{fs},{ass_color(sung)},{ass_color(unsung)},{out_col},"
-            f"{ass_color('#000000', 0.35)},{-1 if bold else 0},{-1 if italic else 0},0,0,100,100,"
+            f"{ass_color(st.shadow_color, 0.0 if st.extrude else 0.35)},{-1 if bold else 0},{-1 if italic else 0},0,0,100,100,"
             f"{st.spacing * g.scale:.1f},0,{border_style},{pad:.1f},{0 if box else shadow_px:.1f},8,{ml},{ml},0,1")
 
 
@@ -165,7 +183,7 @@ def build_ass(lines: List[LyricLine], st: LyricStyle, w: int, h: int, duration: 
     g = _Geom(w, h, st)
     fs = g.fs
     outline_px = st.outline * fs
-    shadow_px = st.shadow * fs
+    shadow_px = max(st.shadow * fs, fs * 0.07) if st.extrude else st.shadow * fs
     highlight = st.highlight != "none"
     unsung, sung = st.color_unsung, (st.color_sung if highlight else st.color_unsung)
 
@@ -213,8 +231,13 @@ def build_ass(lines: List[LyricLine], st: LyricStyle, w: int, h: int, duration: 
         prev_ev_end = end
         y = g.top_y(n_lines)
         fade_out = int(min(260, max(60, (end - ln.end) * 1000)))   # never fade words that are still being sung
-        anim = _anim_tags(st, g.x, y, fs, fade_out)
+        anim = _anim_tags(st, g.x, y, fs, fade_out, w, h)
         text = _karaoke_text(toks, breaks, [(max(a, start), b) for a, b in times], st, start)
+        if st.outline2:
+            ring = "".join(_ass_escape(t) + ("\\N" if k in breaks else " ") for k, t in enumerate(toks)).rstrip()
+            ring_tags = (f"{anim}\\bord{outline_px + fs * 0.085:.1f}{tag_color(3, st.outline2_color)}"
+                         f"\\1a&HFF&\\3a&H00&\\shad0")
+            add(0, start, end, "Main", f"{{{ring_tags}}}{ring}")
         if st.glow:
             glow_tags = (f"{anim}\\bord{fs * 0.20:.1f}\\blur{fs * 0.20:.1f}{tag_color(3, st.glow_color)}"
                          f"\\1a&HFF&\\3a&H30&\\shad0")

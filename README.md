@@ -12,11 +12,18 @@ cloud client, the theme), re-focused on one job.
 |---|---|
 | **1 Song & lyrics** | Choose the audio, paste lyrics (`[Chorus]`-style headers and blank-line verses understood), then **Auto-sync** (offline Whisper + alignment), **Tap to sync** (press Space as each line starts - best for Luganda, Runyankole and other languages Whisper doesn't know) or **Spread evenly**. |
 | **2 Timing** | Table editor: change any time or text, move everything, split / merge / add / delete lines, play from a line, export `.lrc` (with word timing) and `.srt`. |
-| **3 Look & fonts** | 8 presets (Karaoke Bold, Neon Night, Cinematic Gold, Street Poster, Soul & Script, Retro Tape, Clean Minimal, Reggae Sunrise), **15 bundled professional fonts** + add your own `.ttf/.otf`, karaoke fill (sweep or word), glow, box, outline, entrance animation, next-line preview, countdown dots in long gaps, title card, colour grade, grain, vignette, transitions, optional audio visualiser. |
-| **4 Visuals (AI)** | AI reads the lyrics, plans a search phrase per part of the song and downloads matching **video clips or pictures** (needs your API key). Repeated choruses reuse the same background. Pick alternatives with thumbnails, or use your own files. No key? Designed animated gradients - it always renders. Add your logo. |
-| **5 Export** | 16:9, 9:16, 1:1 or 4:5; 480p to 4K; optional loudness normalisation; 22 s preview clip; `.credits.txt` for stock media. Projects save as `.iwlyric`. |
+| **3 Look & fonts** | 23 presets (Karaoke Bold, Neon Night, Aurora Dream, Midnight Rain, Ember Soul, VHS Glitch, Gold Chain, Festival Pop ...), **78 bundled professional fonts in 7 groups** + add your own `.ttf/.otf`, karaoke fill (sweep or word), glow, box, double outline, 3D shadow, 10 entrance animations (bounce, drop, flip, wipe, spread ...), next-line preview, countdown dots in long gaps, title card, colour grade, grain, vignette, transitions, optional audio visualiser, plus cinematic effects: bloom, light leaks, chromatic split, film flicker, handheld shake, scanlines, letterbox, floating particles (stars, snow, embers, rain, bokeh, dust), 8 colour grades and 28 transitions. |
+| **4 Visuals (AI)** | **Custom visuals made for your song**: describe the world of the video and an AI art director designs a different animated look per scene (aurora colour fields, stars, snow, embers, rain, bokeh, dust) - offline, no key; or paint real pictures with your own image-AI key. Plus stock search: AI reads the lyrics, plans a search phrase per part of the song and downloads matching **video clips or pictures** (needs your API key). Repeated choruses reuse the same background. Pick alternatives with thumbnails, or use your own files. No key? Designed animated gradients - it always renders. Add your logo. |
+| **5 Export** | 16:9, 9:16, 1:1 or 4:5; **file-size control** (Tiny / Small / Balanced / High / your own target in MB - the worst-case size is shown before rendering); a built-in **shrinker** for any big video; 22 s preview clip; `.credits.txt` for stock media. Projects save as `.iwlyric`. |
 
 A **live preview** frame (right side) follows every change.
+
+## Why files stay small
+
+Lyric videos only become gigabytes when the encoder is told to keep every grain of noise. Every profile caps the video
+bitrate, so the worst case is known up front (3 min: Tiny <= ~6 MB, Small <= ~22 MB, Balanced <= ~80 MB, High <= ~230 MB at 1080p),
+and the small profiles skip film grain, flicker and shake, which cannot be compressed. A custom target (e.g. 3 MB) picks
+resolution, frame rate and audio bitrate to fit. "Shrink an existing video" re-compresses any file the same way.
 
 ## How it renders
 

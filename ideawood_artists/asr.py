@@ -122,42 +122,77 @@ def find_whisper_cli() -> str:
 
 
 def download_model(key: str, on_progress: Callable[[float], None] = lambda p: None,
-                   should_cancel: Callable[[], bool] = lambda: False) -> str:
-    """Download a model (resumable). Returns the final path."""
+                   should_cancel: Callable[[], bool] = lambda: False,
+                   on_log: Callable[[str], None] = lambda s: None,
+                   on_detail: Callable[[int, int, float, float], None] = lambda done, total, speed, eta: None) -> str:
+    """Download a model (resumable) and report everything: log lines, percent, bytes, speed (B/s), ETA (s)."""
+    import time
     label, fname, approx_mb, _ = MODELS[key]
     dest = model_file(key)
     part = dest + ".part"
     url = MODEL_URL.format(file=fname)
     have = os.path.getsize(part) if os.path.exists(part) else 0
+    on_log(f"Model: {label} (about {approx_mb} MB)")
+    on_log(f"Source: {url}")
+    on_log(f"Saving to: {dest}")
+    if have:
+        on_log(f"Found an unfinished download ({have / 1e6:.1f} MB) - trying to resume it.")
+    on_log("Connecting...")
     req = urllib.request.Request(url, headers={"User-Agent": "IdeawoodStudio", **({"Range": f"bytes={have}-"} if have else {})})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             code = getattr(r, "status", 200)
-            if code == 200:
-                have = 0                       # server ignored Range: start over
-            total = have + int(r.headers.get("Content-Length") or 0)
-            mode = "ab" if have else "wb"
-            with open(part, mode) as f:
+            if code == 200 and have:
+                on_log("The server does not support resuming - starting from the beginning.")
+                have = 0
+            elif have:
+                on_log(f"Resumed at {have / 1e6:.1f} MB.")
+            length = int(r.headers.get("Content-Length") or 0)
+            total = have + length if length else int(approx_mb * 1_000_000)
+            on_log(f"Connected (HTTP {code}). Size: {total / 1e6:.1f} MB. Downloading...")
+            t0, t_last, base, win_t, win_b = time.time(), 0.0, have, time.time(), have
+            speed, next_note = 0.0, 10
+            with open(part, "ab" if have else "wb") as f:
                 while True:
                     if should_cancel():
+                        on_log("Cancelled - the partial file is kept so you can resume later.")
                         raise Cancelled()
-                    chunk = r.read(1 << 18)
+                    chunk = r.read(1 << 17)
                     if not chunk:
                         break
                     f.write(chunk)
                     have += len(chunk)
-                    if total:
+                    now = time.time()
+                    if speed == 0 and now - t0 >= 0.4:           # first estimate quickly, then smooth
+                        speed = (have - base) / max(now - t0, 0.01)
+                    if now - win_t >= 1.0:                       # speed over the last ~second
+                        inst = (have - win_b) / (now - win_t)
+                        speed = inst if speed == 0 else speed * 0.6 + inst * 0.4
+                        win_t, win_b = now, have
+                    if now - t_last >= 0.15:
+                        t_last = now
+                        eta = (total - have) / speed if speed > 1 else 0.0
                         on_progress(min(100.0, have * 100.0 / total))
+                        on_detail(have, total, speed, eta)
+                        pct = have * 100.0 / total
+                        if pct >= next_note:
+                            on_log(f"{int(pct)}%  -  {have / 1e6:.1f} / {total / 1e6:.1f} MB  -  {speed / 1e6:.2f} MB/s")
+                            next_note = int(pct // 10) * 10 + 10
     except Cancelled:
         raise
     except Exception as e:  # noqa: BLE001
+        on_log(f"Download stopped: {e}")
         raise AsrError(f"Could not download the speech model: {e}. Check your internet connection and try again "
                        f"(the download resumes where it stopped).") from e
     size = os.path.getsize(part)
+    on_log(f"Download finished: {size / 1e6:.1f} MB. Checking the file...")
     if size < approx_mb * 1_000_000 * 0.6:
+        on_log("The file is much smaller than expected - keeping it so you can retry/resume.")
         raise AsrError("The downloaded model file looks incomplete. Try again.")
     os.replace(part, dest)
     on_progress(100.0)
+    on_detail(size, size, 0.0, 0.0)
+    on_log(f"Ready: {dest}")
     return dest
 
 
