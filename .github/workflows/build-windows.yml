@@ -70,21 +70,38 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           PYTHONUTF8: "1"
 
-      - name: Build EXE
+      - name: Build app folder (no self-extracting single file: starts fast, nothing unpacks into Temp)
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name IdeawoodStudioArtists `
+          pyinstaller --noconfirm --onedir --windowed --name IdeawoodStudioArtists `
             --icon assets\icon.ico --add-data "assets;assets" --add-data "models;models" `
             --add-binary "bin\ffmpeg.exe;bin" --add-binary "bin\ffprobe.exe;bin" `
             --add-data "bin\whisper;bin\whisper" `
             --hidden-import PySide6.QtMultimedia `
+            --exclude-module PIL --exclude-module tkinter --exclude-module numpy `
+            --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets `
+            --exclude-module PySide6.Qt3DCore --exclude-module PySide6.QtQuick3D --exclude-module PySide6.QtPdf `
             main.py
-          Copy-Item dist\IdeawoodStudioArtists.exe "dist\IdeawoodStudioArtists-${{ github.ref_name }}.exe"
+
+      - name: Self-test the BUILT app (tools, fonts, model, window, lyric render)
+        shell: pwsh
+        run: |
+          $exe = "dist\IdeawoodStudioArtists\IdeawoodStudioArtists.exe"
+          $p = Start-Process $exe -ArgumentList "--selftest","selftest.txt" -Wait -PassThru
+          if (Test-Path selftest.txt) { Get-Content selftest.txt }
+          if ($p.ExitCode -ne 0) { throw "Built app failed its self-test (exit $($p.ExitCode))" }
+
+      - name: Zip for download
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\IdeawoodStudioArtists -DestinationPath dist\IdeawoodStudioArtists-windows.zip -CompressionLevel Optimal
+          "{0:N0} MB" -f ((Get-Item dist\IdeawoodStudioArtists-windows.zip).Length / 1MB)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: IdeawoodStudioArtists-windows
-          path: dist/IdeawoodStudioArtists.exe
+          name: IdeawoodStudioArtists-windows-zip
+          path: dist/IdeawoodStudioArtists-windows.zip
+          compression-level: 0
 
       - name: Release notes from CHANGELOG (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -101,4 +118,4 @@ jobs:
         with:
           name: Ideawood Studio for Artists ${{ github.ref_name }}
           body_path: notes.md
-          files: dist/IdeawoodStudioArtists-${{ github.ref_name }}.exe
+          files: dist/IdeawoodStudioArtists-windows.zip

@@ -43,7 +43,7 @@ Tests: `pip install -r requirements-dev.txt && python -m pytest -q tests`
 ## Windows EXE
 
 Push to GitHub: the **Build Windows EXE** workflow runs the tests, bundles FFmpeg, whisper.cpp and the English base model,
-and produces `IdeawoodStudioArtists.exe`. Tag `v1.0.0` to publish a release.
+and produces `IdeawoodStudioArtists-windows.zip`: extract it fully, then run `IdeawoodStudioArtists.exe` from inside the extracted folder (do not run it from inside the zip). The workflow self-tests the built app before publishing. Tag `v1.0.0` to publish a release.
 
 ## What was kept from voxcut and what was left behind
 

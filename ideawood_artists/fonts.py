@@ -120,9 +120,31 @@ FONT_GROUPS = [g for g in dict.fromkeys(g for _f, g, _m in _TABLE)]
 
 
 def _family_of(path: str) -> str:
+    """Family name from the font's own 'name' table (pure Python - no imaging library needed)."""
+    import struct
     try:
-        from PIL import ImageFont
-        return ImageFont.truetype(path, 24).getname()[0]
+        with open(path, "rb") as fh:
+            d = fh.read()
+        n_tables = struct.unpack(">H", d[4:6])[0]
+        off = ln = None
+        for i in range(n_tables):
+            tag, _cs, o, l = struct.unpack(">4sIII", d[12 + 16 * i:28 + 16 * i])
+            if tag == b"name":
+                off, ln = o, l
+                break
+        if off is None:
+            raise ValueError("no name table")
+        _fmt, count, str_off = struct.unpack(">HHH", d[off:off + 6])
+        best = {}
+        for i in range(count):
+            plat, enc, _lang, nid, length, so = struct.unpack(">6H", d[off + 6 + 12 * i:off + 18 + 12 * i])
+            if nid not in (1, 16):
+                continue
+            raw = d[off + str_off + so: off + str_off + so + length]
+            txt = raw.decode("utf-16-be", "ignore") if plat in (0, 3) else raw.decode("mac_roman", "ignore")
+            if txt.strip():
+                best.setdefault(nid, txt.strip())
+        return best.get(16) or best.get(1) or os.path.splitext(os.path.basename(path))[0].split("-")[0]
     except Exception:  # noqa: BLE001
         return os.path.splitext(os.path.basename(path))[0].split("-")[0]
 
