@@ -70,7 +70,7 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           PYTHONUTF8: "1"
 
-      - name: Build app folder (no self-extracting single file: starts fast, nothing unpacks into Temp)
+      - name: Build app folder (not a self-extracting single file)
         shell: pwsh
         run: |
           pyinstaller --noconfirm --onedir --windowed --name IdeawoodStudioArtists `
