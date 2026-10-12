@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QColo
                                QProgressBar, QPushButton, QScrollArea, QSlider, QStackedWidget, QTableWidget,
                                QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget)
 
-from . import APP_NAME, __version__, asr, encoding, fonts, generative, imagegen, lyrics, render, scenes as scn, syncer, visuals
+from . import APP_NAME, __version__, asr, clips, encoding, fonts, generative, imagegen, lyrics, render, scenes as scn, syncer, visuals
 from .cloud import CloudClient, CloudError
 from .paths import asset_path, bundled_fonts_dir, user_fonts_dir
 from .mediautil import media_info
@@ -362,8 +362,9 @@ class PickerDialog(QDialog):
 
 # --------------------------------------------------------------------------- main window
 class Studio(QMainWindow):
-    def __init__(self):
+    def __init__(self, progress=None):
         super().__init__()
+        self._pg = progress or (lambda text, pct: None)
         self.setWindowTitle(f"{APP_NAME}  v{__version__}")
         self.resize(1480, 880)
         ic = asset_path("icon.png")
@@ -381,14 +382,18 @@ class Studio(QMainWindow):
         self.debounce.setSingleShot(True)
         self.debounce.timeout.connect(self.refresh_preview)
         self._reg_fonts()
+        self._pg("Building the studio window", 56)
         self._build()
+        self._pg("Loading the look presets", 90)
         self.load_preset("Karaoke Bold", quiet=True)
 
     # ---------------------------------------------------------------- fonts
     def _reg_fonts(self):
-        for folder in (bundled_fonts_dir(), user_fonts_dir()):
-            for f in fonts.font_files(folder):
-                QFontDatabase.addApplicationFont(f)
+        files = [f for folder in (bundled_fonts_dir(), user_fonts_dir()) for f in fonts.font_files(folder)]
+        for i, f in enumerate(files):
+            QFontDatabase.addApplicationFont(f)
+            if i % 6 == 0:
+                self._pg(f"Loading fonts ({i + 1} of {len(files)})", 20 + 34 * i / max(len(files), 1))
 
     # ---------------------------------------------------------------- layout
     def _build(self):
@@ -405,8 +410,11 @@ class Studio(QMainWindow):
             self.nav.addItem(s)
         h.addWidget(self.nav)
         self.stack = QStackedWidget()
-        for page in (self.page_song(), self.page_timing(), self.page_look(), self.page_visuals(), self.page_export()):
-            self.stack.addWidget(page)
+        for n, (name, make) in enumerate((("Song & lyrics", self.page_song), ("Timing", self.page_timing),
+                                          ("Look & fonts", self.page_look), ("Visuals", self.page_visuals),
+                                          ("Export", self.page_export))):
+            self._pg(f"Building the {name} page", 58 + 6 * n)
+            self.stack.addWidget(make())
         h.addWidget(self.stack, 3)
         self.nav.currentRowChanged.connect(self._nav)
         h.addWidget(self._preview_panel(), 2)
@@ -1255,7 +1263,140 @@ class Studio(QMainWindow):
         self.result.setObjectName("muted")
         self.result.setWordWrap(True)
         l2.addWidget(self.result)
-        return scroll(f1, f2)
+
+        f3, l3 = card("Short clips - Reels, TikTok, Shorts, WhatsApp status",
+                      "Cut the best part of the song with the lyrics and visuals. A clip never starts or ends in the middle of a lyric line, "
+                      "and the clips are small enough to send on WhatsApp.")
+        self.clip_platform = combo(list(clips.PLATFORMS))
+        self.clip_len = combo([f"{n} s" for n in clips.LENGTHS], "30 s")
+        self.clip_platform.currentTextChanged.connect(lambda _t: self._clip_platform_changed())
+        l3.addWidget(hrow("For", self.clip_platform, "Length", self.clip_len, btn("Suggest clips", self.suggest_clips_ui, True)))
+        self.clip_list = QListWidget()
+        self.clip_list.setMaximumHeight(120)
+        self.clip_list.currentRowChanged.connect(self._clip_picked)
+        l3.addWidget(self.clip_list)
+        self.clip_start, self.clip_end = QDoubleSpinBox(), QDoubleSpinBox()
+        for sp in (self.clip_start, self.clip_end):
+            sp.setRange(0.0, 36000.0)
+            sp.setDecimals(1)
+            sp.setSingleStep(0.5)
+            sp.setSuffix(" s")
+            sp.valueChanged.connect(lambda _v: self._clip_note())
+        self.clip_fade = QCheckBox("Fade picture and sound in and out")
+        self.clip_fade.setChecked(True)
+        l3.addWidget(hrow("From", self.clip_start, "To", self.clip_end, self.clip_fade))
+        self.clip_info = QLabel("Press 'Suggest clips', or type your own start and end (in seconds).")
+        self.clip_info.setObjectName("muted")
+        self.clip_info.setWordWrap(True)
+        l3.addWidget(self.clip_info)
+        l3.addWidget(hrow(btn("Preview this clip", lambda: self.export_clips("preview")), btn("Export this clip", lambda: self.export_clips("one"), True),
+                          btn("Export all suggestions", lambda: self.export_clips("all"))))
+        self.clip_result = QLabel("")
+        self.clip_result.setObjectName("muted")
+        self.clip_result.setWordWrap(True)
+        l3.addWidget(self.clip_result)
+        self._clips = []
+        return scroll(f1, f2, f3)
+
+    # ---------------------------------------------------------------- short clips
+    def _clip_cfg(self):
+        return clips.PLATFORMS[self.clip_platform.currentText()]
+
+    def _clip_platform_changed(self):
+        mx = self._clip_cfg()["max_len"]
+        cur = int(self.clip_len.currentText().split()[0])
+        if cur > mx:
+            self.clip_len.setCurrentText(f"{mx} s")
+        self._clip_note()
+
+    def _clip_note(self):
+        cfg, length = self._clip_cfg(), self.clip_end.value() - self.clip_start.value()
+        if length <= 0:
+            return
+        pl = encoding.plan(clips.profile_label(cfg["profile"]), 1080, length)
+        txt = f"Clip length {length:.1f} s - up to about {pl.est_max_mb:.1f} MB ({pl.short}p)."
+        if length > cfg["max_len"] + 0.05:
+            txt += f"  Too long for this platform (max {cfg['max_len']} s): it will be cut to fit."
+        self.clip_info.setText(txt)
+
+    def suggest_clips_ui(self):
+        if not self.p.audio or not [l for l in self.p.lines if l.timed]:
+            QMessageBox.information(self, APP_NAME, "Time the lyrics first (steps 1-2), then suggest clips.")
+            return
+        length = min(int(self.clip_len.currentText().split()[0]), self._clip_cfg()["max_len"])
+        self._clips = clips.suggest_clips(self.p.lines, self.p.duration, length)
+        self.clip_list.clear()
+        for c in self._clips:
+            self.clip_list.addItem(f"{c.label}   -   {fmt_t(c.start)} to {fmt_t(c.end)}   ({c.length:.0f} s, {c.n_lines} lines)")
+        if self._clips:
+            self.clip_list.setCurrentRow(0)
+        self.say(f"{len(self._clips)} clip suggestions ready.")
+
+    def _clip_picked(self, row):
+        if 0 <= row < len(self._clips):
+            c = self._clips[row]
+            self.clip_start.setValue(c.start)
+            self.clip_end.setValue(c.end)
+
+    def export_clips(self, mode: str):
+        if not self.p.audio or not [l for l in self.p.lines if l.timed]:
+            QMessageBox.information(self, APP_NAME, "Time the lyrics first (steps 1-2).")
+            return
+        cfg = self._clip_cfg()
+        jobs = []                                           # (label, start, end)
+        if mode == "all":
+            if not self._clips:
+                self.suggest_clips_ui()
+            jobs = [(c.label, c.start, c.end) for c in self._clips]
+        else:
+            s, e = self.clip_start.value(), self.clip_end.value()
+            if e - s < 3.0:
+                QMessageBox.information(self, APP_NAME, "A clip must be at least 3 seconds long.")
+                return
+            if e - s > cfg["max_len"]:
+                e = s + cfg["max_len"]
+            jobs = [("clip", s, min(e, self.p.duration))]
+        if not jobs:
+            return
+        base = (self.p.title or "song").replace(" ", "_")
+        folder = out = ""
+        if mode == "all":
+            folder = QFileDialog.getExistingDirectory(self, "Save the clips in this folder")
+            if not folder:
+                return
+        elif mode == "one":
+            out, _ = QFileDialog.getSaveFileName(self, "Save clip as", f"{base}_clip.mp4", "MP4 video (*.mp4)")
+            if not out:
+                return
+        else:
+            out = os.path.join(tempfile.gettempdir(), "iw_artists_clip_preview.mp4")
+        if not self.p.scenes:
+            self.p.scenes = scn.plan_scenes(self.p.lines, self.p.duration)
+        proj, preview, fade = self.p, mode == "preview", self.clip_fade.isChecked()
+
+        def fn(w):
+            done = []
+            for k, (label, s, e) in enumerate(jobs):
+                if w.stop:
+                    raise render.Cancelled()
+                q = clips.make_clip_project(proj, s, e, fade)
+                q.fmt, q.size_profile, q.quality = cfg["fmt"], clips.profile_label(cfg["profile"]), "1080p (Full HD)"
+                path = out if out else os.path.join(folder, f"{base}_{k + 1}_{label.split(' (')[0].lower().replace(' ', '_')}.mp4")
+                w.status.emit(f"Rendering clip {k + 1} of {len(jobs)}: {label}")
+                render.render(q, path, lambda v, k=k: w.progress.emit((k * 100 + v) / len(jobs)), lambda s_: None,
+                              lambda: w.stop, preview=preview)
+                done.append((label, path, os.path.getsize(path) / 1048576))
+            return done
+
+        def ok(done):
+            if preview:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(done[0][1]))
+                self.say("Clip preview opened in your video player.")
+                return
+            self.clip_result.setText("\n".join(f"Saved: {p}  -  {mb:.1f} MB" for _l, p, mb in done))
+            self.say(f"{len(done)} clip(s) ready.")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(os.path.abspath(done[0][1]))))
+        self.run_worker(fn, "Rendering clip..." if len(jobs) == 1 else "Rendering clips...", ok)
 
     def _size_changed(self):
         self.p.size_profile = self.size_prof.currentText()
@@ -1463,16 +1604,31 @@ class Studio(QMainWindow):
             self.say("Cancelling...")
 
 
-def main():
-    app = QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
+def run(app, splash=None):
+    """Start the studio behind the startup splash (see splash.py)."""
+    from .splash import Splash
+    from .startup import warm_engine
+    sp = splash or Splash(APP_NAME, __version__)
+    sp.version = __version__
+    sp.show()
+    app.processEvents()
     qs = QSettings("Ideawood", "IdeawoodArtists")
+    sp.step("Applying the look", 12)
     apply_theme(app, qs.value("theme", "Midnight"), base_pt=10)
-    w = Studio()
+    w = Studio(progress=sp.step)
+    warm_engine(sp.step, app.processEvents, 92, 98)
+    sp.step("Opening the studio", 99)
     w.show()
+    sp.finish()
     if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".iwlyric") and os.path.exists(sys.argv[1]):
         w.load_project(sys.argv[1])
     sys.exit(app.exec())
+
+
+def main():
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    run(app)
 
 
 if __name__ == "__main__":

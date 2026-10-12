@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 - 2026-10-12
+- Short clips: suggested cut points (chorus, build-up, last chorus, opening, ending) snapped to whole lyric lines; platform
+  presets (Reels/TikTok/Shorts, WhatsApp status, Instagram 4:5, square); fades; preview, export one, export all.
+- Startup splash with real progress, elapsed time, heartbeat dots (alive vs frozen), honest hints and a `startup.log`;
+  the video engine is warmed up in the background so the first render is not slow.
+- Fixed: a generated scene followed by a picture/clip/gradient scene made the render fail (wrong ffmpeg input number).
+
 ## 1.1.0 - 2026-10-09
 - File size control: bitrate-capped profiles (Tiny / Small / Balanced / High), custom target size in MB, worst-case size
   shown before rendering, grain/flicker/shake skipped in small files, "Shrink an existing video" tool. Fixes gigabyte outputs.

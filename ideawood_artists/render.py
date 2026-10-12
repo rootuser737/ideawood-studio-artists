@@ -166,7 +166,7 @@ def build_command(p: Project, out_path: str, work: str, ff: str, *, preview: boo
     filt: List[str] = []
     for i, sc in enumerate(scenes):
         L = sc.duration + (T if i < n - 1 else 0.0)
-        args, f = _segment(i, i, sc, L, w, h, st, seed=int(p.duration) + 1)
+        args, f = _segment(inputs.count("-i"), i, sc, L, w, h, st, seed=int(p.duration) + 1)   # real ffmpeg input number
         inputs += args
         filt.append(f)
     if n == 1:
@@ -185,7 +185,7 @@ def build_command(p: Project, out_path: str, work: str, ff: str, *, preview: boo
     cur = "[vp]"
 
     a_idx = inputs.count("-i")                                  # audio is the next input number
-    inputs += ["-i", p.audio]
+    inputs += (["-ss", f"{p.audio_offset:.3f}"] if p.audio_offset > 0 else []) + ["-i", p.audio]
     audio_label = f"{a_idx}:a"
     use_logo = bool(p.logo and os.path.isfile(p.logo))
     if st.viz != "none":
@@ -209,11 +209,13 @@ def build_command(p: Project, out_path: str, work: str, ff: str, *, preview: boo
         filt.append(f"[{li}:v]scale={_even(w * p.logo_size)}:-2,format=rgba,colorchannelmixer=aa=0.9[lg]")
         filt.append(f"{cur}[lg]overlay={_logo_pos(p.logo_pos)}:format=auto[vl]")
         cur = "[vl]"
-    filt.append(f"{cur}ass=filename=lyrics.ass:fontsdir=fonts,format=yuv420p[v]")
+    vfade = (f",fade=t=in:st=0:d=0.35,fade=t=out:st={max(p.duration - 0.7, 0):.2f}:d=0.7" if p.clip_fade else "")
+    filt.append(f"{cur}ass=filename=lyrics.ass:fontsdir=fonts{vfade},format=yuv420p[v]")
+    afade = (f"afade=t=in:st=0:d=0.3,afade=t=out:st={max(p.duration - 0.8, 0):.2f}:d=0.8," if p.clip_fade else "")
     if p.normalize_audio:
-        filt.append(f"{a_src}loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
+        filt.append(f"{a_src}{afade}loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[a]")
     else:
-        filt.append(f"{a_src}aresample=48000[a]")
+        filt.append(f"{a_src}{afade}aresample=48000[a]")
 
     total = p.duration
     out_dur = total if span is None else max(0.5, min(span, total - t0))

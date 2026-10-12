@@ -87,7 +87,8 @@ jobs:
         shell: pwsh
         run: |
           $exe = "dist\IdeawoodStudioArtists\IdeawoodStudioArtists.exe"
-          $p = Start-Process $exe -ArgumentList "--selftest","selftest.txt" -Wait -PassThru
+          $t = Measure-Command { $script:p = Start-Process $exe -ArgumentList "--selftest","selftest.txt" -Wait -PassThru }
+          "First launch + self-test took {0:N1} s (fresh files, Defender on)" -f $t.TotalSeconds
           if (Test-Path selftest.txt) { Get-Content selftest.txt }
           if ($p.ExitCode -ne 0) { throw "Built app failed its self-test (exit $($p.ExitCode))" }
 

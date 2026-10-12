@@ -122,3 +122,21 @@ def test_shrink_existing_video(tmp_path):
     cmd, pl = E.shrink_command("ffmpeg", src, out, "tiny", 1080, 6.0)
     subprocess.run([c for c in cmd if c not in ("-progress", "pipe:1", "-nostats")], check=True, capture_output=True)
     assert os.path.getsize(out) < os.path.getsize(src) * 0.25 and media_info(out)["h"] <= 480
+
+
+@needs_ffmpeg
+def test_generated_scene_followed_by_picture_scene_renders(tmp_path):
+    """Regression: input numbering when a scene without an input file (generated) precedes one with a file."""
+    from PIL import Image
+    song = str(tmp_path / "s.mp3")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=10", song], check=True)
+    img = str(tmp_path / "a.jpg")
+    Image.new("RGB", (640, 360), (120, 40, 90)).save(img)
+    p = Project(audio=song, duration=10.0, quality="480p (fast draft)")
+    p.lines = L.finalize_timing(L.distribute_evenly(L.parse_lyrics("one two three\nfour five six"), 10.0, lead=1.0), 10.0)
+    p.scenes = [Scene(0, 3, "generated", recipe="snow", colors=list(G.PALETTES["snow"]), key="a"),
+                Scene(3, 6, "image", img, key="b"), Scene(6, 8, "generated", recipe="stars", colors=list(G.PALETTES["night_blue"]), key="c"),
+                Scene(8, 10, "gradient", key="d")]
+    out = str(tmp_path / "m.mp4")
+    render(p, out)
+    assert abs(media_info(out)["duration"] - 10.0) < 0.3

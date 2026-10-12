@@ -70,6 +70,8 @@ class Project:
     logo_size: float = 0.12
     credit: bool = False
     normalize_audio: bool = False
+    audio_offset: float = 0.0       # clips: start of the cut inside the song
+    clip_fade: bool = False         # clips: fade picture and sound in/out
     size_profile: str = "Balanced - YouTube & Instagram (3 min: up to ~80 MB, 1080p)"
     target_mb: float = 10.0
     language: str = "auto"

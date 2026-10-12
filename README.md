@@ -18,6 +18,19 @@ cloud client, the theme), re-focused on one job.
 
 A **live preview** frame (right side) follows every change.
 
+## Short clips (Reels, TikTok, Shorts, WhatsApp status)
+
+Export > *Short clips*: press **Suggest clips** and the app proposes the chorus, the build-up into it, the last chorus, the
+opening and the ending, cut to whole lyric lines (found from your lyrics, so it works in any language). Pick a platform
+(9:16, 4:5, 1:1; WhatsApp status is capped at 30 s and exported tiny), adjust the start/end if you like, then preview, export one
+clip or export all suggestions. Clips fade in and out and are small enough to send on WhatsApp.
+
+## Startup
+
+A splash appears immediately with a progress bar, the time spent, and three pulsing dots - **moving dots mean the app is alive,
+frozen dots mean it is stuck**. It names every step and writes timings to `startup.log` (in `%LOCALAPPDATA%\\IdeawoodStudio\\Artists`).
+The first start after installing can be slow because Windows scans every new file once; later starts are fast.
+
 ## Why files stay small
 
 Lyric videos only become gigabytes when the encoder is told to keep every grain of noise. Every profile caps the video
